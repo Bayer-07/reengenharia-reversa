@@ -15,8 +15,8 @@ Refatoração (engenharia reversa com IA) de um cálculo financeiro monolítico.
 ```
 src/main/java/com/engreversa/financial/
 ├── Client.java               # dados do cliente
-├── ClientType.java           # tipos de cliente e valor adicional
-├── FinancialCalculator.java  # regras de cálculo
+├── ClientType.java           # tipos de cliente e suas regras (polimorfismo)
+├── FinancialCalculator.java  # soma os valores e delega ao tipo
 └── Main.java                 # execução de exemplo
 src/test/java/com/engreversa/financial/
 └── FinancialCalculatorTest.java

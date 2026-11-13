@@ -1,0 +1,106 @@
+name: Pipeline de Evolucao Segura (CI/CD)
+
+# 1. GATILHO: apenas push de tags de versão (ex.: v1.0.0). Commits comuns não disparam.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ${{ secrets.DOCKER_USERNAME }}/sistema-reengenheirado
+
+jobs:
+  # 2. QUALITY GATE DE CÓDIGO: testes, cobertura e análise estática no SonarCloud.
+  #    Complexidade Ciclomática, Code Smells e Duplicações aparecem no painel.
+  #    Se o Quality Gate falhar, o job falha e a entrega é bloqueada.
+  analise_sonar:
+    name: Quality Gate de Codigo (SonarCloud)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do codigo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # histórico completo para o Sonar calcular "new code"
+
+      - name: Configurar Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configurar Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Testes, cobertura e analise Sonar
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: ./gradlew build sonar -Dsonar.qualitygate.wait=true
+
+  # 3a. QUALITY GATE DE SEGURANÇA: bibliotecas (gradle.lockfile), segredos e Dockerfile.
+  analise_trivy_fs:
+    name: Quality Gate de Seguranca (Trivy - codigo e dependencias)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do codigo
+        uses: actions/checkout@v7
+
+      # Fixado por SHA (v0.36.0): as tags antigas desta action foram
+      # comprometidas em mar/2026 (CVE-2026-33634).
+      - name: Rodar Trivy (filesystem)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          scanners: 'vuln,secret,misconfig'
+          ignore-unfixed: true
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+  # 3b + 4. Gera a imagem, escaneia a imagem final (base openjdk/alpine) com o Trivy
+  #         e só então publica no Docker Hub. Roda apenas se os dois gates passarem.
+  build_and_push_docker:
+    name: Build, Scan da Imagem e Push para Docker Hub
+    needs: [analise_sonar, analise_trivy_fs]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do codigo
+        uses: actions/checkout@v7
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build da imagem (local, ainda sem publicar)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:latest
+
+      - name: Rodar Trivy (imagem Docker)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'image'
+          image-ref: ${{ env.IMAGE }}:${{ github.ref_name }}
+          scanners: 'vuln'
+          ignore-unfixed: true
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+      - name: Login no Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Publica exatamente a imagem que foi escaneada.
+      - name: Push para Docker Hub
+        run: |
+          docker push "${IMAGE}:${GITHUB_REF_NAME}"
+          docker push "${IMAGE}:latest"
